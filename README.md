@@ -223,7 +223,7 @@ This is the *entire* inner loop, I didn't need to truncate it for size as I did 
 ### Why the difference?
 So what is going on, can we fix this? Some possible issues:
 1. In C++, I had to store the tile of accumulators in a local temporary in order to get the compiler to keep them in registers.
-2. In C++, I use a 3x4 tile of registers, in mojo I'm using 4x4. Using 4x3 crashes the mojo example, because `tile[]` can't handle tile sizes that don't divide the dimensions. (The C++ version uses some tricks to avoid this, see [array's README.md) for more information](https://github.com/dsharlet/array#slicing-cropping-and-splitting). We actually could fix this in our local `tile` function, but we really need something similar for `vectorize` too.
+2. In C++, I use a 3x4 tile of registers, in mojo I'm using 4x4. Using 4x3 crashes the mojo example, because `tile[]` can't handle tile sizes that don't divide the dimensions. (The C++ version uses some tricks to avoid this, see [array's README.md) for more information](https://github.com/dsharlet/array#slicing-cropping-and-splitting).
 
 (2) is easy to test, we can just tweak the C++ version to use 4x4 tiles. As expected, it spills a few of the accumulator registers, and gets a bit slower, running in 5.5ms (vs. 3.4ms before), still far from 20ms in mojo.
 
@@ -365,7 +365,7 @@ After getting hands on with it for a few days, here are my thoughts:
   Languages like Halide completely hide these details, and you can vectorize by any number of elements, even if it isn't a convenient multiple of the SIMD width. Or, as in my C++ code above, we just present scalar code to the compiler that is readily vectorized, and it handles dispatching to multiple vectors, or a mix of SSE and AVX vectors, or maybe something more exotic on other architectures.
 - There needs to be more explicit control over where allocations go. There needs to be an easy way to put allocations on the stack, and the compiler needs to be good at promoting those to registers when appropriate. Maybe this exists already, I can't find it in the docs (or the [roadmap](https://docs.modular.com/mojo/roadmap.html)). I understand priorities may be different right now, but this one really seems fundamental to making mojo a useful language, and might be very difficult to support while remaining faithful to python.
 - I don't understand why things like address arithmetic aren't being lifted out of inner loops. Assuming mojo is using LLVM as a backend, mojo should be getting optimizations like this for "free". It would be shocking if Chris Lattner *didn't* use his own wildly successful project here...
-- Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? The official [matmul_tiled_parallelized](https://github.com/modularml/mojo/blob/7e667e951008ade31621dbd37217a562ae82472f/examples/matmul.mojo#L152) example didn't find a better way either. I realized after I rewrote my code that I could make a new `tile_parallel`:
+- Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? I realized after I rewrote my code that I could make a new `tile_parallel`:
 ```
 # Perform 2D tiling on the iteration space defined by end_x and end_y, and parallelize the rows of tiles.
 fn tile_parallel[tiled_fn: Tile2DFunc, tile_x: Int, tile_y: Int](end_x: Int, end_y: Int):
