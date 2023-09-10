@@ -223,7 +223,7 @@ This is the *entire* inner loop, I didn't need to truncate it for size as I did 
 ### Why the difference?
 So what is going on, can we fix this? Some possible issues:
 1. In C++, I had to store the tile of accumulators in a local temporary in order to get the compiler to keep them in registers.
-2. In C++, I use a 3x4 tile of registers, in mojo I'm using 4x4. Using 4x3 crashes the mojo example, because `tile[]` can't handle tile sizes that don't divide the dimensions. (The C++ version uses some tricks to avoid this, see [array's README.md) for more information](https://github.com/dsharlet/array#slicing-cropping-and-splitting).
+2. In C++, I use a 3x4 tile of registers, in mojo I'm using 4x4. Using 4x3 crashes the mojo example, because `tile[]` can't handle tile sizes that don't divide the dimensions. (The C++ version uses some tricks to avoid this, see [array's README.md) for more information](https://github.com/dsharlet/array#slicing-cropping-and-splitting). We actually could fix this in our local `tile` function, but we really need something similar for `vectorize` too.
 
 (2) is easy to test, we can just tweak the C++ version to use 4x4 tiles. As expected, it spills a few of the accumulator registers, and gets a bit slower, running in 5.5ms (vs. 3.4ms before), still far from 20ms in mojo.
 
@@ -311,7 +311,8 @@ Unfortunately, this runs slower, in 26ms. The inner loop actually does look much
    1a34b:       0f 85 1f fe ff ff       jne    1a170 <$matrix::matmul_tile_output($matrix::Matrix,$matrix::Matrix,$matrix::Matrix,$runtime::$llcl::Runtime)+0x260>
 ```
 It looks like storing the accumulators in a local temporary eliminated a lot of the overhead due to address computations, but it is still storing and reloading them on every iteration of k.
-Other than that, the inner loop looks quite close to optimal!
+It's also doing something really weird, rotating all of the registers by one at the end of the inner loop.
+If not for these two issues, this inner loop would be pretty good!
 
 It's also allocating and freeing the tile explicitly in every tile of output. Moving the tile outside the `calc_tile` helper fixes this:
 ```
