@@ -137,38 +137,7 @@ fn matmul_tile_output(
 ```
 Unfortunately, this runs in ~24ms. Looking at the disassembly, the inner loop looks like this:
 ```
-   1a3ae:       48 8b 5a 10             mov    0x10(%rdx),%rbx
-   1a3b2:       4c 8b 2a                mov    (%rdx),%r13
-   1a3b5:       48 0f af d9             imul   %rcx,%rbx
-   1a3b9:       48 01 eb                add    %rbp,%rbx
-   1a3bc:       c4 c1 7c 10 44 9d 00    vmovups 0x0(%r13,%rbx,4),%ymm0
-   1a3c3:       48 8b 5e 10             mov    0x10(%rsi),%rbx
-   1a3c7:       4c 8b 2e                mov    (%rsi),%r13
-   1a3ca:       49 0f af d8             imul   %r8,%rbx
-   1a3ce:       48 01 cb                add    %rcx,%rbx
-   1a3d1:       c4 c2 7d 18 4c 9d 00    vbroadcastss 0x0(%r13,%rbx,4),%ymm1
-   1a3d8:       48 8b 5f 10             mov    0x10(%rdi),%rbx
-   1a3dc:       4c 8b 2f                mov    (%rdi),%r13
-   1a3df:       49 0f af d8             imul   %r8,%rbx
-   1a3e3:       48 01 eb                add    %rbp,%rbx
-   1a3e6:       c4 c2 7d a8 4c 9d 00    vfmadd213ps 0x0(%r13,%rbx,4),%ymm0,%ymm1
-   1a3ed:       c4 c1 7c 11 4c 9d 00    vmovups %ymm1,0x0(%r13,%rbx,4)
-   1a3f4:       48 8b 5a 10             mov    0x10(%rdx),%rbx
-   1a3f8:       4c 8b 2a                mov    (%rdx),%r13
-   1a3fb:       48 0f af d9             imul   %rcx,%rbx
-   1a3ff:       48 01 c3                add    %rax,%rbx
-   1a402:       c4 c1 7c 10 44 9d 00    vmovups 0x0(%r13,%rbx,4),%ymm0
-   1a409:       48 8b 5e 10             mov    0x10(%rsi),%rbx
-   1a40d:       4c 8b 2e                mov    (%rsi),%r13
-   1a410:       49 0f af d8             imul   %r8,%rbx
-   1a414:       48 01 cb                add    %rcx,%rbx
-   1a417:       c4 c2 7d 18 4c 9d 00    vbroadcastss 0x0(%r13,%rbx,4),%ymm1
-   1a41e:       48 8b 5f 10             mov    0x10(%rdi),%rbx
-   1a422:       4c 8b 2f                mov    (%rdi),%r13
-   1a425:       49 0f af d8             imul   %r8,%rbx
-   1a429:       48 01 c3                add    %rax,%rbx
-   1a42c:       c4 c2 7d a8 4c 9d 00    vfmadd213ps 0x0(%r13,%rbx,4),%ymm0,%ymm1
-   1a433:       c4 c1 7c 11 4c 9d 00    vmovups %ymm1,0x0(%r13,%rbx,4)
+   ...
    1a43a:       48 8b 5a 10             mov    0x10(%rdx),%rbx
    1a43e:       4c 8b 2a                mov    (%rdx),%r13
    1a441:       48 0f af d9             imul   %rcx,%rbx
@@ -190,7 +159,8 @@ Unfortunately, this runs in ~24ms. Looking at the disassembly, the inner loop lo
    1a488:       49 39 cd                cmp    %rcx,%r13
    1a48b:       0f 85 8f fb ff ff       jne    1a020 <$matrix::matmul_tile_output($matrix::Matrix,$matrix::Matrix,$matrix::Matrix,$runtime::$llcl::Runtime)+0x110>
 ```
-There are 4x4 = 16 of these `vfmadd213ps` sequences, as we should expect. There's simply a ton of overhead. It looks like there's a lot of address arithmetic that isn't being simplified and lifted out of these inner loops.
+This is cropped for size, there are 4x4 = 16 of these `vfmadd213ps` sequences, as we should expect, i.e. the inner loop is 16x bigger than shown here.
+There's simply a ton of overhead. It looks like there's a lot of address arithmetic that isn't being simplified and lifted out of these inner loops.
 
 In contrast, here is the C++ version from above:
 ```
@@ -262,6 +232,7 @@ fn matmul_tile_output(
 ```
 Unfortunately, this runs slower, in 26ms. The inner loop actually does look much better now:
 ```
+   ...
    1a277:       c5 fc 28 f5             vmovaps %ymm5,%ymm6
    1a27b:       c4 a2 7d 18 04 96       vbroadcastss (%rsi,%r10,4),%ymm0
    1a281:       c4 c2 7d b8 21          vfmadd231ps (%r9),%ymm0,%ymm4
@@ -310,9 +281,10 @@ Unfortunately, this runs slower, in 26ms. The inner loop actually does look much
    1a348:       4c 39 d8                cmp    %r11,%rax
    1a34b:       0f 85 1f fe ff ff       jne    1a170 <$matrix::matmul_tile_output($matrix::Matrix,$matrix::Matrix,$matrix::Matrix,$runtime::$llcl::Runtime)+0x260>
 ```
+As before, I've truncated this for size.
 It looks like storing the accumulators in a local temporary eliminated a lot of the overhead due to address computations, but it is still storing and reloading them on every iteration of k.
 It's also doing something really weird, rotating all of the registers by one at the end of the inner loop.
-If not for these two issues, this inner loop would be pretty good!
+If not for these two (pretty big) issues, this inner loop would be pretty good!
 
 It's also allocating and freeing the tile explicitly in every tile of output. Moving the tile outside the `calc_tile` helper fixes this:
 ```
