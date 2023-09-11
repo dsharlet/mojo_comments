@@ -1,18 +1,12 @@
 # Mojo's matmul example
-Programming languages targeting fast numerical code are interesting to me.
-So of course, I was interested in mojo when it was announced. My first thought was "show me some disassembly!".
-My second thought was "show me a comparison to something other than python!".
+Programming languages targeting fast numerical code are interesting to me. So of course, I was interested in mojo when it was announced. My first thought was "show me some disassembly!". My second thought was "show me a comparison to something other than python!".
 
-When the SDK was released, I started playing with it. 
-If you're like me and wanted to see some generated code and comparisons to high performance languages, this doc of notes is for you. I understand the language is very new and still in the early stages. You should understand this too before reading this document.
+When the SDK was released, I started playing with it. If you're like me and wanted to see some generated code and comparisons to high performance languages, this doc of notes is for you. I understand the language is very new and still in the early stages. You should understand this too before reading this document.
 
 I started with the [matmul.mojo](https://github.com/modularml/mojo/blob/main/examples/matmul.mojo) example.
 
 ## Thoughts on parallelism
-I removed thread parallelism from all of the implementations. 
-Thread parallelism isn't very interesting. 
-Of course, it is very useful, but it is mostly orthogonal to programming language and code quality, and in my opinion, should be the
-last optimization to make, after we've maximized the utilization of one core.
+I removed thread parallelism from all of the implementations. Thread parallelism isn't very interesting. Of course, it is very useful, but it is mostly orthogonal to programming language and code quality, and in my opinion, should be the last optimization to make, after we've maximized the utilization of one core.
 
 This gives the following results:
 ```
@@ -29,8 +23,7 @@ Throughput of a 512x512 {tiled + vectorized + not_parallelized} matrix multiplic
 Throughput of a 512x512 {tiled + unrolled + vectorized + not_parallelized} matrix multiplication in Mojo:
 26.228654146516149 GFLOP/s,  10.234435  ms
 ```
-It's a bit interesting, it looks like the overhead from the various tiling and unrolling splits actually slow things down a little,
-without parallelism to hide it.
+It's a bit interesting, it looks like the overhead from the various tiling and unrolling splits actually slow things down a little, without parallelism to hide it.
 
 ## Optimization strategy
 The next thing I wanted to do was try a different strategy. In order to describe the strategies, let's first describe the naive algorithm with pseudocode:
@@ -103,8 +96,7 @@ NOINLINE void multiply_reduce_tiles(const_matrix_ref<T> A, const_matrix_ref<T> B
 }
 ```
 
-This runs in 3.4ms on my machine (for 512x512 matrices, the same as the mojo examples).
-Recall the best mojo example ran in 7.97ms, over 2x slower.
+This runs in 3.4ms on my machine (for 512x512 matrices, the same as the mojo examples). Recall the best mojo example ran in 7.97ms, over 2x slower.
 
 ### Mojo output tiling
 Here is my attempt at replicating this strategy in mojo:
@@ -159,8 +151,7 @@ Unfortunately, this runs in ~24ms. Looking at the disassembly, the inner loop lo
    1a488:       49 39 cd                cmp    %rcx,%r13
    1a48b:       0f 85 8f fb ff ff       jne    1a020 <$matrix::matmul_tile_output($matrix::Matrix,$matrix::Matrix,$matrix::Matrix,$runtime::$llcl::Runtime)+0x110>
 ```
-This is cropped for size, there are 4x4 = 16 of these `vfmadd213ps` sequences, as we should expect, i.e. the inner loop is 16x bigger than shown here.
-There's simply a ton of overhead. It looks like there's a lot of address arithmetic that isn't being simplified and lifted out of these inner loops.
+This is cropped for size, there are 4x4 = 16 of these `vfmadd213ps` sequences, as we should expect, i.e. the inner loop is 16x bigger than shown here. There's simply a ton of overhead. It looks like there's a lot of address arithmetic that isn't being simplified and lifted out of these inner loops.
 
 In contrast, here is the C++ version from above:
 ```
@@ -281,10 +272,7 @@ Unfortunately, this runs slower, in 26ms. The inner loop actually does look much
    1a348:       4c 39 d8                cmp    %r11,%rax
    1a34b:       0f 85 1f fe ff ff       jne    1a170 <$matrix::matmul_tile_output($matrix::Matrix,$matrix::Matrix,$matrix::Matrix,$runtime::$llcl::Runtime)+0x260>
 ```
-As before, I've truncated this for size.
-It looks like storing the accumulators in a local temporary eliminated a lot of the overhead due to address computations, but it is still storing and reloading them on every iteration of k.
-It's also doing something really weird, rotating all of the registers by one at the end of the inner loop.
-If not for these two (pretty big) issues, this inner loop would be pretty good!
+As before, I've truncated this for size. It looks like storing the accumulators in a local temporary eliminated a lot of the overhead due to address computations, but it is still storing and reloading them on every iteration of k. It's also doing something really weird, rotating all of the registers by one at the end of the inner loop. If not for these two (pretty big) issues, this inner loop would be pretty good!
 
 It's also allocating and freeing the tile explicitly in every tile of output. Moving the tile outside the `calc_tile` helper fixes this:
 ```
@@ -319,48 +307,38 @@ fn matmul_tile_output(
 
   tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
 ```
-This runs in 7.5ms, finally (roughly) matching the original matmul.mojo examples!
-However, this requires poking holes in the `tile` abstraction, which makes the code not nearly as nice.
-We really need a way to make small cheap stack allocations in mojo to avoid this.
+This runs in 7.5ms, finally (roughly) matching the original matmul.mojo examples! But still more than 2x slower than C++. However, this requires poking holes in the `tile` abstraction, which makes the code not nearly as nice. We really need a way to make small cheap stack allocations in mojo to avoid this.
 
 ## Varying the size of the matrix
-One way to possibly work around some of these issues is to change the size of the matrix being computed.
-Making `K` larger would amortize some of the overheads noted above. Unfortunately, this causes one of the official examples to crash!
+One way to possibly work around some of these issues is to change the size of the matrix being computed. Making `K` larger would amortize some of the overheads noted above. Unfortunately, this causes one of the official examples to crash!
 
-# Thoughts
+# Observations
 
-When I first saw mojo, I liked the idea. I want to be able to write code expressively, but still get good performance, without relying on too much automatic compiler magic.
-Being able to be explicit about tiling, splitting loops, unrolling and vectorizing, etc. looked like a big step forward that previously only existed in niche languages like [https://halide-lang.org](Halide) or in messy ways like SIMD intrinsics.
+When I first saw mojo, I liked the idea. I want to be able to write code expressively, but still get good performance, without relying on too much automatic compiler magic. Being able to be explicit about tiling, splitting loops, unrolling and vectorizing, etc. looked like a big step forward that previously only existed in niche languages like [Halide](https://halide-lang.org) or in messy ways like SIMD intrinsics.
 
-After getting hands on with it for a few days, here are my thoughts:
-- The `vectorize` (and `vectorize_unroll`) abstractions are leaky, you still have to write things like `C.load[nelts](...)` to get a vector load of `nelts`. And if `nelts` isn't one of the precise SIMD widths available in the instruction set, the code will fail to compile.
-  Languages like Halide completely hide these details, and you can vectorize by any number of elements, even if it isn't a convenient multiple of the SIMD width. Or, as in my C++ code above, we just present scalar code to the compiler that is readily vectorized, and it handles dispatching to multiple vectors, or a mix of SSE and AVX vectors, or maybe something more exotic on other architectures.
+After getting hands on with it for a few days, here are my observations and thoughts so far:
+- The `vectorize` (and `vectorize_unroll`) abstractions are leaky, you still have to write things like `C.load[nelts](...)` to get a vector load of `nelts`. 
+  - This is bug prone, it assumes that the stride of the elements in the dimension being vectorized is one. This shouldn't be an assumption made on the part of the programmer.
+  - If `nelts` isn't one of the precise SIMD widths available in the instruction set, the code will fail to compile.
+    It should be easy to vectorize by any number of elements, and the compiler should deal with generating multiple vectors worth of code (or partial vectors). In my C++ code above, we just present scalar code to the compiler that is readily vectorized, and it handles dispatching to multiple vectors, or a mix of SSE and AVX vectors, or maybe something more exotic on other architectures.
 - There needs to be more explicit control over where allocations go. There needs to be an easy way to put allocations on the stack, and the compiler needs to be good at promoting those to registers when appropriate. Maybe this exists already, I can't find it in the docs (or the [roadmap](https://docs.modular.com/mojo/roadmap.html)). I understand priorities may be different right now, but this one really seems fundamental to making mojo a useful language, and might be very difficult to support while remaining faithful to python.
 - I don't understand why things like address arithmetic aren't being lifted out of inner loops. Assuming mojo is using LLVM as a backend, mojo should be getting optimizations like this for "free". It would be shocking if Chris Lattner *didn't* use his own wildly successful project here...
-- Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? I realized after I rewrote my code that I could make a new `tile_parallel`:
-```
-# Perform 2D tiling on the iteration space defined by end_x and end_y, and parallelize the rows of tiles.
-fn tile_parallel[tiled_fn: Tile2DFunc, tile_x: Int, tile_y: Int](end_x: Int, end_y: Int):
-  # Note: this assumes that ends are multiples of the tiles.
-  @parameter
-  fn row(yo: Int):
-    let y = tile_y * yo
-    for x in range(0, end_x, tile_x):
-      tiled_fn[tile_x, tile_y](x, y)
+- Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? This can be made a little less messy, e.g. modifying the `tile` function to be `tile_parallel`, but this still requires a new function for each higher order function to apply to.
 
-  parallelize[row](end_y // tile_y)
-```
-But this still seems like a suboptimal approach. We really ought to be able to compose the higher order functions.
+Some of these issues seem readily fixable, and it seems like after they are fixed, the inner loop code quality should be comparable to the C++ code. However, some seem more difficult.
 
-Most of these issues seem readily fixable, and it seems like after they are fixed, the inner loop code quality should be comparable to the C++ code.
+The last issue of composability of the higher order functions seems more fundamental. I find that when I'm trying to experiment with the strategy for optimization, I need to rewrite significant parts of my code in ways that aren't intuitive to read and understand. And when I do this, I introduce bugs that take me a while to find, and this seems like a more inherent part of the language that can't easily be fixed. I find it much easier to modify the strategy used for code written in C++ using the array library's helpers like `split`. Languages like Halide go even further to enable exploring the schedule space without needing to modify the program (and introduce bugs).
+
+Basically, the following needs to be automated (like the C++ code above) so the programmer doesn't have to fill in all this logic about the bounds of tiles:
+```
+@parameter
+fn calc_tile[tile_w: Int, tile_h: Int](xo: Int, yo: Int)
+  ...
+
+parallelize[lambda yo: tile[calc_tile, tile_w, tile_h](a.width, range(yo*tile_h, (yo + 1)*tile_h))](a.height // tile_h)
+```
+Maybe some kind of partial function application with named variables can handle this. It seems like it will require redesigning the higher order functions to understand `range`s and not just sizes.
 
 ## Expressiveness/productivity of mojo vs. alternatives
 
-The last issue of composability seems more fundamental.
-I find that when I'm trying to experiment with the strategy for optimization, I need to rewrite significant parts of my code in ways that aren't intuitive to read and understand.
-And when I do this, I introduce bugs that take me a while to find, and this seems like a more inherent part of the language that can't easily be fixed.
-I find it much easier to modify the strategy used for code written in C++ using the array library's helpers like `split`.
-Languages like Halide go even further to enable exploring the schedule space without needing to modify the program (and introduce bugs).
-
-Perhaps this is just an artifact of me being new to the language, but mojo really does not seem very expressive.
-When I compare my mojo code (or the official matmul.mojo examples), I feel it is quite a bit easier to read, understand, and modify my C++ example above.
+Mojo really does not seem very expressive. When I compare my mojo code (or the official matmul.mojo examples), I feel it is quite a bit harder to read, understand, and modify than my C++ example above. But I have been happily using C++ for decades, and mojo only for a few days. Perhaps there are ways to use mojo more expressively that I haven't thought of yet.
