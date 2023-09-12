@@ -309,6 +309,75 @@ fn matmul_tile_output(
 ```
 This runs in 7.5ms, finally (roughly) matching the original matmul.mojo examples! But still more than 2x slower than C++. However, this requires poking holes in the `tile` abstraction, which makes the code not nearly as nice. We really need a way to make small cheap stack allocations in mojo to avoid this.
 
+## Update: using `memory.stack_allocation`
+On https://github.com/modularml/mojo/discussions/735, a user pointed me to `memory.stack_allocation`, which seems like what I was looking for. I attempted to use this for the temporary tile. To do this, we need to add a new `MatrixView` type that accepts a pointer to data as input, instead of allocating. Here is this implementation:
+```
+fn matmul_tile_output_temp_tile_stack(
+  C: Matrix, A: Matrix, B: Matrix, rt: Runtime
+):
+  @parameter
+  fn calc_tile[tile_j: Int, tile_i: Int](jo: Int, io: Int):
+
+    var temp = MatrixView(tile_i, tile_j, stack_allocation[tile_i * tile_j, DType.float32]())
+    temp.zero()
+    
+    for k in range(0, A.cols):
+      @parameter
+      fn calc_tile_row[i: Int]():
+        @parameter
+        fn calc_tile_cols[nelts: Int](j: Int):
+          temp.store[nelts](i, j, temp.load[nelts](i, j) + A[io + i, k] * B.load[nelts](k, jo + j))
+
+        vectorize_unroll[nelts, tile_j // nelts, calc_tile_cols](tile_j)
+
+      unroll[tile_i, calc_tile_row]()
+      
+    # Copy the local tile to the output
+    for i in range(tile_i):
+      for j in range(tile_j):
+        C[io + i, jo + j] = temp[i, j]
+
+  alias tile_i = 4
+  alias tile_j = nelts*4
+  tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
+```
+Unfortunately, this performs almost identically to the heap version! I tried various checks to see if it really is a stack allocation, and it seems to be so:
+- Calling `free()` on this allocation fails like one would expect.
+- Allocating 1GB fails with a stack overflow-ish looking failure.
+
+Lifting this allocation out of the loops does give the best performance yet, at 5.8ms, within 2x of my C++ code, and ~50% faster than any of the official mojo matmul examples. The inner loop assembly is looking decent at this point, it seems like the compiler is just not lifting some (or all) of the loads and stores out of the loop over rows:
+```
+   1e9d9:       c4 e2 7d 18 24 8a       vbroadcastss (%rdx,%rcx,4),%ymm4
+   1e9df:       48 89 d9                mov    %rbx,%rcx
+   1e9e2:       c5 7c 11 94 24 a0 00    vmovups %ymm10,0xa0(%rsp)
+   1e9e9:       00 00
+   1e9eb:       c4 41 7c 28 d3          vmovaps %ymm11,%ymm10
+   1e9f0:       c4 41 7c 28 dc          vmovaps %ymm12,%ymm11
+   1e9f5:       c4 41 7c 28 e5          vmovaps %ymm13,%ymm12
+   1e9fa:       c4 41 7c 28 ee          vmovaps %ymm14,%ymm13
+   1e9ff:       c4 41 7c 28 f7          vmovaps %ymm15,%ymm14
+   1ea04:       c5 7c 28 f8             vmovaps %ymm0,%ymm15
+   1ea08:       c5 fc 10 84 24 20 01    vmovups 0x120(%rsp),%ymm0
+   1ea0f:       00 00
+   1ea11:       c4 e2 5d b8 fa          vfmadd231ps %ymm2,%ymm4,%ymm7
+   1ea16:       c4 e2 75 b8 f4          vfmadd231ps %ymm4,%ymm1,%ymm6
+   1ea1b:       c4 62 5d b8 cd          vfmadd231ps %ymm5,%ymm4,%ymm9
+   1ea20:       c4 62 5d b8 c3          vfmadd231ps %ymm3,%ymm4,%ymm8
+   1ea25:       c5 fc 11 7c 24 40       vmovups %ymm7,0x40(%rsp)
+   1ea2b:       c5 fc 11 b4 24 c0 00    vmovups %ymm6,0xc0(%rsp)
+   1ea32:       00 00
+   1ea34:       c5 fc 10 bc 24 00 01    vmovups 0x100(%rsp),%ymm7
+   1ea3b:       00 00
+   1ea3d:       c5 fc 10 b4 24 e0 00    vmovups 0xe0(%rsp),%ymm6
+   1ea44:       00 00
+   1ea46:       c5 fc 10 54 24 40       vmovups 0x40(%rsp),%ymm2
+   1ea4c:       c5 fc 10 8c 24 c0 00    vmovups 0xc0(%rsp),%ymm1
+   1ea53:       00 00
+   1ea55:       48 39 dd                cmp    %rbx,%rbp
+   1ea58:       0f 85 92 fe ff ff       jne    1e8f0 <$matmul::matmul_tile_output_temp_tile_stack_lifted($matmul::Matrix,$matmul::Matrix,$matmul::Matrix,$runtime::$llcl::Runtime)+0x230>
+```
+There are 4 more of these sequences, one for each row.
+
 ## Varying the size of the matrix
 One way to possibly work around some of these issues is to change the size of the matrix being computed. Making `K` larger would amortize some of the overheads noted above. Unfortunately, this causes one of the official examples to crash!
 
@@ -322,6 +391,7 @@ After getting hands on with it for a few days, here are my observations and thou
   - If `nelts` isn't one of the precise SIMD widths available in the instruction set, the code will fail to compile.
     It should be easy to vectorize by any number of elements, and the compiler should deal with generating multiple vectors worth of code (or partial vectors). In my C++ code above, we just present scalar code to the compiler that is readily vectorized, and it handles dispatching to multiple vectors, or a mix of SSE and AVX vectors, or maybe something more exotic on other architectures.
 - There needs to be more explicit control over where allocations go. There needs to be an easy way to put allocations on the stack, and the compiler needs to be good at promoting those to registers when appropriate. Maybe this exists already, I can't find it in the docs (or the [roadmap](https://docs.modular.com/mojo/roadmap.html)). I understand priorities may be different right now, but this one really seems fundamental to making mojo a useful language, and might be very difficult to support while remaining faithful to python.
+  - Update: This exists, as described in the above updated section.
 - I don't understand why things like address arithmetic aren't being lifted out of inner loops. Assuming mojo is using LLVM as a backend, mojo should be getting optimizations like this for "free". It would be shocking if Chris Lattner *didn't* use his own wildly successful project here...
 - Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? This can be made a little less messy, e.g. modifying the `tile` function to be `tile_parallel`, but this still requires a new function for each higher order function to apply to.
 
