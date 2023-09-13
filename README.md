@@ -5,23 +5,30 @@ When the SDK was released, I started playing with it. If you're like me and want
 
 I started with the [matmul.mojo](https://github.com/modularml/mojo/blob/main/examples/matmul.mojo) example.
 
-## Thoughts on parallelism
+Update 9/12/2023: I was able to get `perf` working (I'm on Windows Subsystem for Linux, it was non-obvious). It allowed me to find and resolve a number of distracting issues. I've updated the doc accordingly.
+
+## Differences from matrix.mojo
+
+### Random initialization
+I moved the `rand` initialization of `Matrix.data`, to avoid this overhead when using `Matrix` for temporary tile data.
+
+### Parallelism
 I removed thread parallelism from all of the implementations. Thread parallelism isn't very interesting. Of course, it is very useful, but it is mostly orthogonal to programming language and code quality, and in my opinion, should be the last optimization to make, after we've maximized the utilization of one core.
 
 This gives the following results:
 ```
 Throughput of a 512x512 matrix multiplication in Mojo using a naive algorithm:
-7.9945532238111028 GFLOP/s,  33.577293000000004  ms
+7.8623165681034024 GFLOP/s,  34.142031000000003  ms
 Throughput of a 512x512 matrix multiplication in Mojo using vectorization:
-32.997195977578151 GFLOP/s,  8.1350990000000003  ms
+33.97651373601407 GFLOP/s,  7.9006179999999997  ms
 Throughput of a 512x512 matrix multiplication in Mojo using the stdlib `vectorize`:
-33.68763712815938 GFLOP/s,  7.9683670000000006  ms
+39.004071057077041 GFLOP/s,  6.8822420000000006  ms
 Throughput of a 512x512 {vectorized + not_parallelized} matrix multiplication in Mojo:
-33.038384818528883 GFLOP/s,  8.1249570000000002  ms
+38.475479493228477 GFLOP/s,  6.9767929999999998  ms
 Throughput of a 512x512 {tiled + vectorized + not_parallelized} matrix multiplication in Mojo:
-24.335731440087024 GFLOP/s,  11.030507  ms
+23.756592579311008 GFLOP/s,  11.299409000000001  ms
 Throughput of a 512x512 {tiled + unrolled + vectorized + not_parallelized} matrix multiplication in Mojo:
-26.228654146516149 GFLOP/s,  10.234435  ms
+26.118186111669495 GFLOP/s,  10.277721999999999  ms
 ```
 It's a bit interesting, it looks like the overhead from the various tiling and unrolling splits actually slow things down a little, without parallelism to hide it.
 
@@ -33,10 +40,23 @@ for i:  // C.rows
     for k:  // A.cols
       C[i, j] += A[i, k] * B[k, j]
 ```
+In words: starting from a textbook definition of matrix multiplication, reorder the loops over j and k, which allows j to vectorize cleanly, and avoid accessing columns of memory in the inner loop.
+
 The strategy for fast computation used in the mojo example is to:
-- Parallelize i
+- Parallelize i (disabled as mentioned above)
 - Tile `[j, k]` into tiles of `[nelts * tile_size, tile_size]`
 - Vectorize and unroll within each row of the tile
+
+Or in pseudo-code:
+```
+for i:                           // C.rows
+  for jo:                        // C.cols / (nelts * tile_size)
+    for ko:                      // A.cols / tile_size
+      unrolled for k:            // tile_size
+        vectorize_unroll for j:  // nelts * tile_size
+          C[i, jo + j] += A[i, ko + k] * B[ko + k, jo + j]
+```
+Let's call this the "tiling j-k" approach
 
 In my experience, the best strategy for a simple but fast matrix multiply is something more like this:
 - Tile `[i, j]` into tiles of `[tile_rows, tile_cols]`, where `tile_cols` is a multiple of the SIMD width, and `tile_rows * tile_cols` is tuned to avoid using too many registers.
@@ -44,21 +64,52 @@ In my experience, the best strategy for a simple but fast matrix multiply is som
 
 Or in psuedo-code:
 ```
-for io:  // C.rows
-  for jo:  // C.cols
-    for k:  // A.cols
-      for i:
-        for j:
+for io:                   // C.rows / tile_rows
+  for jo:                 // C.cols / tile_cols
+    for k:                // A.cols
+      unroll for i:       // tile_rows
+        vectorize for j:  // tile_cols
           C[io + i, jo + j] += A[io + i, k] * B[k, jo + j]
 ```
-This strategy is designed such that the accumulators for `C` can be kept in registers, and we only need to read `tile_rows + tile_cols` values of input to compute `tile_rows * tile_cols` values of output.
+This strategy is designed such that the accumulators for `C` can be kept in registers, and we only need to read `tile_rows + tile_cols` values of input to compute `tile_rows * tile_cols` values of output. Let's call this the "tiling i-j" approach
 
-### C++ version of tiling
+### C++ version
 
-This can be nicely implemented in C++ with some helpers from [my array library](https://github.com/dsharlet/array):
+Both of these can be nicely implemented in C++ with some helpers from [my array library](https://github.com/dsharlet/array). First, the mojo strategy:
 ```
 template <typename T>
-NOINLINE void multiply_reduce_tiles(const_matrix_ref<T> A, const_matrix_ref<T> B, matrix_ref<T> C) {
+NOINLINE void mojo_tiling_jk(const_matrix_ref<T> A, const_matrix_ref<T> B, matrix_ref<T> C) {
+  // Adjust this depending on the target architecture. For AVX2,
+  // vectors are 256-bit.
+  constexpr index_t vector_size = 32 / sizeof(T);
+
+  // We want the tiles to be as big as possible without spilling any
+  // of the accumulator registers to the stack.
+  constexpr index_t tile_rows = 4;
+  constexpr index_t tile_cols = vector_size * 4;
+
+  for (auto i : C.i()) {
+    for (auto jo : split<tile_cols>(C.j())) {
+      auto C_ijo = C(i, jo);
+
+      T buffer[tile_cols] = {0};
+      auto accumulator = make_array_ref(buffer, make_compact(C_ijo.shape()));
+
+      for (auto ko : split<tile_rows>(A.j()))
+        for (auto k : ko)
+          for (auto j : jo)
+            accumulator(j) += A(i, k) * B(k, j);
+
+      for (auto j : jo)
+        C_ijo(j) = accumulator(j);
+    }
+  }
+}
+```
+And my preferred strategy:
+```
+template <typename T>
+NOINLINE void tiling_ij(const_matrix_ref<T> A, const_matrix_ref<T> B, matrix_ref<T> C) {
   // Adjust this depending on the target architecture. For AVX2,
   // vectors are 256-bit.
   constexpr index_t vector_size = 32 / sizeof(T);
@@ -77,26 +128,23 @@ NOINLINE void multiply_reduce_tiles(const_matrix_ref<T> A, const_matrix_ref<T> B
       auto accumulator = make_array_ref(buffer, make_compact(C_ijo.shape()));
 
       // Perform the matrix multiplication for this tile.
-      for (index_t k : A.j()) {
-        for (index_t i : C_ijo.i()) {
-          for (index_t j : C_ijo.j()) {
+      for (index_t k : A.j())
+        for (index_t i : C_ijo.i())
+          for (index_t j : C_ijo.j())
             accumulator(i, j) += A(i, k) * B(k, j);
-          }
-        }
-      }
 
       // Copy the accumulators to the output.
-      for (index_t i : C_ijo.i()) {
-        for (index_t j : C_ijo.j()) {
+      for (index_t i : C_ijo.i())
+        for (index_t j : C_ijo.j())
           C_ijo(i, j) = accumulator(i, j);
-        }
-      }
     }
   }
 }
 ```
 
-This runs in 3.4ms on my machine (for 512x512 matrices, the same as the mojo examples). Recall the best mojo example ran in 7.97ms, over 2x slower.
+This runs in 3.4ms on my machine (for 512x512 matrices, the same as the mojo examples). Recall the best mojo example ran in 6.9ms, about 2x slower.
+
+For reference, the mojo strategy implemented in C++ runs in 10.6ms. This is very close to the mojo version of the same strategy!
 
 ### Mojo output tiling
 Here is my attempt at replicating this strategy in mojo:
@@ -274,7 +322,7 @@ Unfortunately, this runs slower, in 26ms. The inner loop actually does look much
 ```
 As before, I've truncated this for size. It looks like storing the accumulators in a local temporary eliminated a lot of the overhead due to address computations, but it is still storing and reloading them on every iteration of k. It's also doing something really weird, rotating all of the registers by one at the end of the inner loop. If not for these two (pretty big) issues, this inner loop would be pretty good!
 
-It's also allocating and freeing the tile explicitly in every tile of output. Moving the tile outside the `calc_tile` helper fixes this:
+It's also allocating and freeing the tile on the heap in every tile of output. Moving the tile outside the `calc_tile` helper fixes this:
 ```
 fn matmul_tile_output(
   C: Matrix, A: Matrix, B: Matrix, rt: Runtime
@@ -309,7 +357,7 @@ fn matmul_tile_output(
 ```
 This runs in 7.5ms, finally (roughly) matching the original matmul.mojo examples! But still more than 2x slower than C++. However, this requires poking holes in the `tile` abstraction, which makes the code not nearly as nice. We really need a way to make small cheap stack allocations in mojo to avoid this.
 
-## Update: using `memory.stack_allocation`
+## Update 9/11/2023: using `memory.stack_allocation`
 On https://github.com/modularml/mojo/discussions/735, a user pointed me to `memory.stack_allocation`, which seems like what I was looking for. I attempted to use this for the temporary tile. To do this, we need to add a new `MatrixView` type that accepts a pointer to data as input, instead of allocating. Here is this implementation:
 ```
 fn matmul_tile_output_temp_tile_stack(
@@ -341,11 +389,7 @@ fn matmul_tile_output_temp_tile_stack(
   alias tile_j = nelts*4
   tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
 ```
-Unfortunately, this performs almost identically to the heap version! I tried various checks to see if it really is a stack allocation, and it seems to be so:
-- Calling `free()` on this allocation fails like one would expect.
-- Allocating 1GB fails with a stack overflow-ish looking failure.
-
-Lifting this allocation out of the loops does give the best performance yet, at 5.8ms, within 2x of my C++ code, and ~50% faster than any of the official mojo matmul examples. The inner loop assembly is looking decent at this point, it seems like the compiler is just not lifting some (or all) of the loads and stores out of the loop over rows:
+This gives the best performance yet, at 5.7ms, within 2x of my C++ code, and 25-50% faster than any of the official mojo matmul examples. The inner loop assembly is looking decent at this point, it seems like the compiler is just not lifting some (or all) of the loads and stores out of the loop over rows:
 ```
    1e9d9:       c4 e2 7d 18 24 8a       vbroadcastss (%rdx,%rcx,4),%ymm4
    1e9df:       48 89 d9                mov    %rbx,%rcx
@@ -378,10 +422,16 @@ Lifting this allocation out of the loops does give the best performance yet, at 
 ```
 There are 4 more of these sequences, one for each row.
 
-## Varying the size of the matrix
-One way to possibly work around some of these issues is to change the size of the matrix being computed. Making `K` larger would amortize some of the overheads noted above. Unfortunately, this causes one of the official examples to crash!
+## Summary and performance observations
+To summarize the data above, here are 3 basic implementations, measured in both Mojo and C++ (all times in milliseconds, 512x512 matrices):
 
-# Observations
+| Strategy           | Mojo | C++  |
+|--------------------|------|------|
+| "Naive"            | 33   | 8.7  |
+| Tiling j-k         | 10   | 10.6 |
+| Tiling i-j         | 5.7  | 3.4  |
+
+# Thoughts on Mojo so far
 
 When I first saw mojo, I liked the idea. I want to be able to write code expressively, but still get good performance, without relying on too much automatic compiler magic. Being able to be explicit about tiling, splitting loops, unrolling and vectorizing, etc. looked like a big step forward that previously only existed in niche languages like [Halide](https://halide-lang.org) or in messy ways like SIMD intrinsics.
 
@@ -393,9 +443,11 @@ After getting hands on with it for a few days, here are my observations and thou
 - There needs to be more explicit control over where allocations go. There needs to be an easy way to put allocations on the stack, and the compiler needs to be good at promoting those to registers when appropriate. Maybe this exists already, I can't find it in the docs (or the [roadmap](https://docs.modular.com/mojo/roadmap.html)). I understand priorities may be different right now, but this one really seems fundamental to making mojo a useful language, and might be very difficult to support while remaining faithful to python.
   - Update: This exists, as described in the above updated section.
 - I don't understand why things like address arithmetic aren't being lifted out of inner loops. Assuming mojo is using LLVM as a backend, mojo should be getting optimizations like this for "free". It would be shocking if Chris Lattner *didn't* use his own wildly successful project here...
+- Mojo is matching C++ in one case, despite the generated code looking terrible. Interestingly, I can't find anything at all wrong with the C++ generated code, it's very clean and vectorized, profiling does not show time being spent in any unexpected places. I'm not sure what Mojo is doing in this case to do so well.
+- The inner loop of the i-j tiling version in mojo just needs a little work from LLVM, and I think it would match the C++ code.
 - Composing the higher order functions for vectorization, parallelism, etc. seems difficult. What if I want to tile a function, and then parallelize the outer loop over rows of tiles? This can be made a little less messy, e.g. modifying the `tile` function to be `tile_parallel`, but this still requires a new function for each higher order function to apply to.
 
-Some of these issues seem readily fixable, and it seems like after they are fixed, the inner loop code quality should be comparable to the C++ code. However, some seem more difficult.
+Some of these issues seem readily fixable, and it seems like after they are fixed, the inner loop code quality should be comparable to the C++ code.
 
 The last issue of composability of the higher order functions seems more fundamental. I find that when I'm trying to experiment with the strategy for optimization, I need to rewrite significant parts of my code in ways that aren't intuitive to read and understand. And when I do this, I introduce bugs that take me a while to find, and this seems like a more inherent part of the language that can't easily be fixed. I find it much easier to modify the strategy used for code written in C++ using the array library's helpers like `split`. Languages like Halide go even further to enable exploring the schedule space without needing to modify the program (and introduce bugs).
 

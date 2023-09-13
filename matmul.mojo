@@ -37,7 +37,6 @@ struct Matrix:
 
     fn __init__(inout self, rows: Int, cols: Int):
         self.data = DTypePointer[DType.float32].alloc(rows * cols)
-        rand(self.data, rows * cols)
         self.rows = rows
         self.cols = cols
 
@@ -70,7 +69,6 @@ struct MatrixView:
 
     fn __init__(inout self, rows: Int, cols: Int, data: DTypePointer[DType.float32]):
         self.data = data
-        rand(self.data, rows * cols)
         self.rows = rows
         self.cols = cols
 
@@ -283,39 +281,7 @@ fn matmul_tile_output(
   alias tile_i = 4
   alias tile_j = nelts*4
   tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
-
-# Try using a temporary tile instead of accumulating directly in the output.
-fn matmul_tile_output_temp_tile(
-  C: Matrix, A: Matrix, B: Matrix, rt: Runtime
-):
-
-  @parameter
-  fn calc_tile[tile_j: Int, tile_i: Int](jo: Int, io: Int):
-
-    var temp = Matrix(tile_i, tile_j)
-    temp.zero()
-
-    for k in range(0, A.cols):
-      @parameter
-      fn calc_tile_row[i: Int]():
-
-        @parameter
-        fn calc_tile_cols[nelts: Int](j: Int):
-          temp.store[nelts](i, j, temp.load[nelts](i, j) + A[io + i, k] * B.load[nelts](k, jo + j))
-
-        vectorize_unroll[nelts, tile_j // nelts, calc_tile_cols](tile_j)
-
-      unroll[tile_i, calc_tile_row]()
-      
-    # Copy the local tile to the output
-    for i in range(tile_i):
-      for j in range(tile_j):
-        C[io + i, jo + j] = temp[i, j]
-
-  alias tile_i = 4
-  alias tile_j = nelts*4
-  tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
-  
+    
 fn matmul_tile_output_temp_tile_stack(
   C: Matrix, A: Matrix, B: Matrix, rt: Runtime
 ):
@@ -343,36 +309,6 @@ fn matmul_tile_output_temp_tile_stack(
 
   alias tile_i = 4
   alias tile_j = nelts*4
-  tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
-  
-fn matmul_tile_output_temp_tile_stack_lifted(
-  C: Matrix, A: Matrix, B: Matrix, rt: Runtime
-):
-  alias tile_i = 4
-  alias tile_j = nelts*4
-  var temp = MatrixView(tile_i, tile_j, stack_allocation[tile_i * tile_j, DType.float32]())
-
-  @parameter
-  fn calc_tile[tile_j: Int, tile_i: Int](jo: Int, io: Int):
-
-    temp.zero()
-    
-    for k in range(0, A.cols):
-      @parameter
-      fn calc_tile_row[i: Int]():
-        @parameter
-        fn calc_tile_cols[nelts: Int](j: Int):
-          temp.store[nelts](i, j, temp.load[nelts](i, j) + A[io + i, k] * B.load[nelts](k, jo + j))
-
-        vectorize_unroll[nelts, tile_j // nelts, calc_tile_cols](tile_j)
-
-      unroll[tile_i, calc_tile_row]()
-      
-    # Copy the local tile to the output
-    for i in range(tile_i):
-      for j in range(tile_j):
-        C[io + i, jo + j] = temp[i, j]
-
   tile[calc_tile, tile_j, tile_i](C.cols, C.rows)
   
 # Tile the output, and parallelize rows of tiles
@@ -406,11 +342,6 @@ fn matmul_tile_output_parallel(
   tile_parallel[calc_tile, tile_j, tile_i](C.cols, C.rows)
 
 
-fn fill_non_zero(A: Matrix):
-    for i in range(0, A.rows):
-        for j in range(0, A.cols):
-            A[i, j] = i + j
-
 @always_inline
 fn benchmark[
     func: fn (Matrix, Matrix, Matrix, Runtime) -> None
@@ -419,8 +350,8 @@ fn benchmark[
     C.zero()
     var A = Matrix(M, K)
     var B = Matrix(K, N)
-    fill_non_zero(A)
-    fill_non_zero(B)
+    rand(A.data, M*K)
+    rand(B.data, K*N)
 
     with Runtime() as rt:
 
@@ -514,25 +445,11 @@ fn main():
             "Throughput of a 512x512 {tiled output} matrix multiplication in Mojo: "
         ),
     )
-    benchmark[matmul_tile_output_temp_tile](
-        M, N, K,
-        python_gflops,
-        (
-            "Throughput of a 512x512 {tiled output, temporary tile on the heap} matrix multiplication in Mojo: "
-        ),
-    )
     benchmark[matmul_tile_output_temp_tile_stack](
         M, N, K,
         python_gflops,
         (
             "Throughput of a 512x512 {tiled output, temporary tile on the stack} matrix multiplication in Mojo: "
-        ),
-    )
-    benchmark[matmul_tile_output_temp_tile_stack_lifted](
-        M, N, K,
-        python_gflops,
-        (
-            "Throughput of a 512x512 {tiled output, temporary tile on the stack, lifted out of loops} matrix multiplication in Mojo: "
         ),
     )
     benchmark[matmul_tile_output_parallel](
