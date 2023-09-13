@@ -431,6 +431,8 @@ To summarize the data above, here are 3 basic implementations, measured in both 
 | Tiling j-k         | 10   | 10.6 |
 | Tiling i-j         | 5.7  | 3.4  |
 
+A side note: all of my performance measurements in mojo are extremely noisy. I've done my best to filter the noise by taking the min of many observations. My C++ code does not show this level of noise.
+
 # Thoughts on Mojo so far
 
 When I first saw mojo, I liked the idea. I want to be able to write code expressively, but still get good performance, without relying on too much automatic compiler magic. Being able to be explicit about tiling, splitting loops, unrolling and vectorizing, etc. looked like a big step forward that previously only existed in niche languages like [Halide](https://halide-lang.org) or in messy ways like SIMD intrinsics.
