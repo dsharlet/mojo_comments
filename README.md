@@ -7,6 +7,9 @@ I started with the [matmul.mojo](https://github.com/modularml/mojo/blob/main/exa
 
 Update 9/12/2023: I was able to get `perf` working (I'm on Windows Subsystem for Linux, it was non-obvious). It allowed me to find and resolve a number of distracting issues. I've updated the doc accordingly.
 
+Update 10/31/2023: I sent a [pull request](https://github.com/modularml/mojo/pull/770) for the multiply implementation I described below.
+This was [merged](https://github.com/modularml/mojo/commit/2b8fb45e5e451d83c53fef49653b69afe8e4753e) (renamed to "accumulated" from "output_tiled"), and highlighted in their [next announcement](https://www.modular.com/blog/mojo-is-now-available-on-mac), it is nearly 10x faster than any other implementation!
+
 ## Differences from matrix.mojo
 
 ### Random initialization
